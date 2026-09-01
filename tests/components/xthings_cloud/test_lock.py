@@ -1,7 +1,9 @@
 """Tests for Xthings Cloud lock platform."""
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
@@ -11,13 +13,19 @@ from homeassistant.components.lock import (
     SERVICE_UNLOCK,
     LockState,
 )
+from homeassistant.components.xthings_cloud.const import DEFAULT_SCAN_INTERVAL, DOMAIN
 from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from . import get_device_by_id, setup_integration
 
-from tests.common import MockConfigEntry, snapshot_platform
+from tests.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    async_load_json_object_fixture,
+    snapshot_platform,
+)
 
 
 async def test_locks(
@@ -100,6 +108,40 @@ async def test_updating_state(
             "battery": 80,
         },
     )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("lock.front_door_lock")
+    assert state is not None
+    assert state.state == LockState.UNLOCKED.value
+
+
+async def test_polled_status_does_not_override_pushed_state(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    mock_api_client: AsyncMock,
+    mock_websocket: AsyncMock,
+) -> None:
+    """Test a poll does not override the lock state pushed over the WebSocket."""
+    with patch("homeassistant.components.xthings_cloud.PLATFORMS", [Platform.LOCK]):
+        await setup_integration(hass, mock_config_entry)
+
+    mock_websocket.call_args[1]["on_device_status"](
+        "dev_lock_001",
+        {
+            "locked": False,
+            "jammed": False,
+            "battery": 80,
+        },
+    )
+    await hass.async_block_till_done()
+
+    # The polled status still reports the lock as locked
+    mock_api_client.async_get_devices.return_value = [
+        await async_load_json_object_fixture(hass, "XT-LK50.json", DOMAIN)
+    ]
+    freezer.tick(timedelta(seconds=DEFAULT_SCAN_INTERVAL))
+    async_fire_time_changed(hass)
     await hass.async_block_till_done()
 
     state = hass.states.get("lock.front_door_lock")
